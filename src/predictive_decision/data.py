@@ -1,21 +1,45 @@
-"""Synthetic regional site data with three features and a target volume (thousands of units)."""
+"""Synthetic weekly retail sales for 20 products with price and marketing decisions."""
 
 import numpy as np
 import pandas as pd
 
-REGION_NAMES = ("region_a", "region_b", "region_c")
+PRODUCTS = [f"p{i:02d}" for i in range(1, 21)]
+N_WEEKS = 156
+UNIT_COST = 40.0
+BASE_PRICE = 60.0
+ELASTICITY = -2.5
+MARKETING_LIFT = 0.4
+MARKETING_HALF_SATURATION = 150.0
 
 
-def generate_regions(n_sites: int = 10_000, seed: int = 0) -> dict[str, pd.DataFrame]:
-    """Return one DataFrame per region with features f0, f1, f2 and the target `product`."""
+def base_demand(product_index: int) -> float:
+    """Deterministic baseline demand per product, spread between 40 and 200 units."""
+    return 40.0 + 160.0 * ((product_index * 37) % 20) / 19
+
+
+def expected_units(base, price, marketing, week):
+    """True expected weekly units: price elasticity, saturating marketing lift and seasonality."""
+    season = 0.2 * np.sin(2 * np.pi * np.asarray(week) / 52)
+    price_effect = (np.asarray(price) / BASE_PRICE) ** ELASTICITY
+    m = np.asarray(marketing, dtype=float)
+    marketing_effect = 1 + MARKETING_LIFT * m / (m + MARKETING_HALF_SATURATION)
+    return base * np.exp(season) * price_effect * marketing_effect
+
+
+def generate_sales(seed: int = 0) -> pd.DataFrame:
+    """Return one row per product and week with price, marketing and realized units."""
     rng = np.random.default_rng(seed)
-    regions = {}
-    for i, name in enumerate(REGION_NAMES):
-        f0, f1, f2 = rng.normal(0, 1, (3, n_sites))
-        noise = rng.normal(0, 3 + i, n_sites)
-        product = 90 + 8 * f0 + 3 * f1 - 4 * f2 + 2 * i + noise
-        regions[name] = pd.DataFrame({
-            "f0": f0, "f1": f1, "f2": f2,
-            "product": np.clip(product, 0, None),
-        })
-    return regions
+    weeks = np.arange(N_WEEKS)
+    frames = []
+    for i, product in enumerate(PRODUCTS):
+        price = BASE_PRICE * rng.uniform(0.8, 1.2, N_WEEKS)
+        marketing = rng.uniform(0.0, 500.0, N_WEEKS)
+        mean = expected_units(base_demand(i), price, marketing, weeks)
+        frames.append(pd.DataFrame({
+            "product": product,
+            "week": weeks,
+            "price": price.round(2),
+            "marketing": marketing.round(2),
+            "units": rng.poisson(mean),
+        }))
+    return pd.concat(frames, ignore_index=True)

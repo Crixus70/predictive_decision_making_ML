@@ -1,47 +1,61 @@
 import numpy as np
-import pandas as pd
-import pytest
 
-from predictive_decision.data import REGION_NAMES, generate_regions
-from predictive_decision.economics import bootstrap_profit, break_even_volume, profit_top_sites
-from predictive_decision.model import FEATURES, train_region
+from predictive_decision.data import N_WEEKS, PRODUCTS, generate_sales
+from predictive_decision.decision import CURRENT_POLICY, PRICE_GRID, expected_profit, marketing_roi, optimize
+from predictive_decision.experiment import ab_test, store_profits
+from predictive_decision.forecast import design, fit_demand_model, validate
 
-
-def test_generate_regions_shape_and_names():
-    regions = generate_regions(n_sites=500, seed=1)
-    assert tuple(regions) == REGION_NAMES
-    for df in regions.values():
-        assert list(df.columns) == FEATURES + ["product"]
-        assert len(df) == 500
-        assert (df["product"] >= 0).all()
+HORIZON = np.arange(130, N_WEEKS)
 
 
-def test_train_region_split_and_metrics():
-    df = generate_regions(n_sites=2000, seed=2)["region_a"]
-    result = train_region(df, seed=2)
-    assert len(result["validation"]) == 500
-    assert result["rmse"] > 0
-    assert result["mean_predicted"] == pytest.approx(result["validation"]["predicted"].mean())
+def test_sales_shape_and_signs():
+    sales = generate_sales(0)
+    assert len(sales) == len(PRODUCTS) * N_WEEKS
+    assert (sales["units"] >= 0).all()
+    assert sales["price"].between(0.8 * 60, 1.2 * 60).all()
 
 
-def test_break_even_volume():
-    assert break_even_volume(100.0, 10.0, 5) == pytest.approx(2.0)
+def test_sales_are_reproducible():
+    assert generate_sales(0).equals(generate_sales(0))
 
 
-def test_profit_top_sites_selects_highest_predicted():
-    validation = pd.DataFrame({
-        "actual": [10.0, 1.0, 20.0],
-        "predicted": [9.0, 0.5, 19.0],
-    })
-    profit = profit_top_sites(validation, n_select=2, budget=100.0, revenue_per_unit=10.0)
-    assert profit == pytest.approx((10.0 + 20.0) * 10.0 - 100.0)
+def test_model_beats_naive_forecast():
+    result = validate(generate_sales(0), 104, 130)
+    assert result["mae_model"] < result["mae_naive"]
 
 
-def test_bootstrap_profit_is_reproducible():
-    validation = generate_regions(n_sites=400, seed=3)["region_b"].assign(
-        actual=lambda d: d["product"], predicted=lambda d: d["product"])
-    a = bootstrap_profit(validation, 50, 1_000.0, 100.0, n_samples=50, seed=7)
-    b = bootstrap_profit(validation, 50, 1_000.0, 100.0, n_samples=50, seed=7)
-    assert a == b
-    assert 0.0 <= a["loss_risk"] <= 1.0
-    assert np.isfinite(a["mean_profit"])
+def test_design_matrix_has_product_indicators():
+    x = design(generate_sales(0).head(5))
+    assert x.shape == (5, len(PRODUCTS) + 3)
+
+
+def test_optimized_policy_beats_current_policy():
+    sales = generate_sales(0)
+    model = fit_demand_model(sales[sales["week"] < 130])
+    policy = optimize(model, HORIZON)
+    current = {p: dict(CURRENT_POLICY) for p in PRODUCTS}
+    assert expected_profit(policy, HORIZON) > expected_profit(current, HORIZON)
+    assert all(PRICE_GRID.min() <= v["price"] <= PRICE_GRID.max() for v in policy.values())
+
+
+def test_marketing_roi_is_positive_where_spend_exists():
+    policy = {p: {"price": 66.0, "marketing": 200.0} for p in PRODUCTS}
+    roi = marketing_roi(policy, HORIZON)
+    assert roi.notna().all()
+    assert (roi > 0).all()
+
+
+def test_ab_test_detects_clear_uplift():
+    rng = np.random.default_rng(0)
+    control = rng.normal(100, 10, 300)
+    treatment = rng.normal(115, 10, 300)
+    result = ab_test(control, treatment)
+    assert result["p_value"] < 0.001
+    assert result["ci_low_pct"] > 0
+
+
+def test_store_profits_are_reproducible():
+    policy = {p: dict(CURRENT_POLICY) for p in PRODUCTS}
+    a = store_profits(policy, HORIZON, 50, np.random.default_rng(1))
+    b = store_profits(policy, HORIZON, 50, np.random.default_rng(1))
+    assert np.array_equal(a, b)
